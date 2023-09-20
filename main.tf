@@ -88,3 +88,28 @@ resource "azurerm_load_test" "load_test" {
   location            = azurerm_resource_group.rg.location
   resource_group_name = azurerm_resource_group.rg.name
 }
+
+resource "azurerm_key_vault" "vault" {
+  name                = "vault"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+
+  sku_name = "standard" 
+}
+
+resource "azurerm_key_vault_key" "rsa_key" {
+  name         = "my-rsa-key"
+  key_vault_id = azurerm_key_vault.vault.id
+
+  key_type = "RSA"
+  key_size = 1024
+
+  key_opts = [
+    "decrypt",
+    "encrypt",
+    "sign",
+    "unwrapKey",
+    "verify",
+    "wrapKey",
+  ]
+}
