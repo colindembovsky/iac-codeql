@@ -1,0 +1,232 @@
+name: Infra deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      destroy:
+        type: boolean
+        description: Destroy environment?
+        required: true
+        default: false
+  
+env:
+  tf_actions_working_dir: .
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  plan:
+    name: Terraform plan
+    runs-on: ubuntu-latest
+    environment: tfplan
+    defaults:
+      run:
+        working-directory: ${{ env.tf_actions_working_dir }}
+    
+    steps:
+    - uses: actions/checkout@v2
+
+    - name: Log in to Azure using OIDC
+      uses: azure/login@v1
+      with:
+        client-id: ${{ vars.AZURE_CLIENT_ID }}
+        tenant-id: ${{ vars.AZURE_TENANT_ID }}
+        subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v1
+
+    - name: Setup TFLint
+      uses: terraform-linters/setup-tflint@v1
+    
+    - name: Terraform fmt
+      id: fmt
+      run: terraform fmt -check
+      continue-on-error: true
+
+    - name: Terraform Init
+      id: init
+      run: terraform init
+      env:
+        ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+        ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+        ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+        ARM_USE_OIDC: true
+
+    - name: Terraform Validate
+      id: validate
+      run: terraform validate -no-color
+      
+    - name: Init TFLint
+      run: tflint --init
+
+    - name: Run TFLint
+      run: tflint -f compact
+    
+    - name: Calculate destroy arg
+      id: destroy_arg
+      run: |
+        if [ $DESTROY == "true" ]; then
+          echo "val=-destroy" >> $GITHUB_OUTPUT
+        else
+          echo "val= " >> $GITHUB_OUTPUT
+        fi
+      env:
+        DESTROY: ${{ github.event.inputs.destroy }}
+
+    - name: Terraform Plan
+      id: plan
+      run: terraform plan $DESTROY -no-color --out=out.tfplan
+      env:
+        ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+        ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+        ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+        ARM_USE_OIDC: true
+        DESTROY: ${{ steps.destroy_arg.outputs.val }}
+
+    - name: Create the plan summary
+      uses: actions/github-script@v6
+      if: always()
+      id: summary
+      env:
+        PLAN: '${{ steps.plan.outputs.stdout }}'
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        script: |
+          // 1. Prep the output
+          const output = `#### Terraform Format and Style 🖌\`${{ steps.fmt.outcome }}\`
+          #### Terraform Initialization ⚙️\`${{ steps.init.outcome }}\`
+          #### Terraform Validation 🤖\`${{ steps.validate.outcome }}\`
+          <details><summary>Validation Output</summary>
+
+          \`\`\`\n
+          ${{ steps.validate.outputs.stdout }}
+          \`\`\`
+
+          </details>
+
+          #### Terraform Plan 📖\`${{ steps.plan.outcome }}\`
+          
+          <details><summary>Show Plan</summary>
+          
+          \`\`\`\n
+          ${process.env.PLAN}
+          \`\`\`
+          
+          </details>
+          
+          *Pusher: @${{ github.actor }}, Action: \`${{ github.event_name }}\`, Working Directory: \`${{ env.tf_actions_working_dir }}\`, Workflow: \`${{ github.workflow }}\`*`;
+          
+          // 2. Set the output variable
+          const fs = require('fs');
+          fs.writeFileSync('${{ env.tf_actions_working_dir }}/summary.md', output);
+          core.setOutput('summary', output);
+      
+    - name: Write a step summary
+      if: always()
+      run: cat summary.md >> $GITHUB_STEP_SUMMARY
+
+    - name: Upload the plan
+      uses: actions/upload-artifact@v3
+      with:
+        name: tf-plan
+        path: ${{ env.tf_actions_working_dir }}/out.tfplan
+
+    - name: Publish plan as a status
+      if: github.event_name == 'pull_request'
+      uses: Sibz/github-status-action@v1.1.6
+      with:
+        authToken: ${{ secrets.GITHUB_TOKEN }}
+        state: ${{ steps.summary.outputs.summary }}
+        context: Terraform Plan
+        description: Terraform Plan Summary
+        sha: ${{ github.event.pull_request.head.sha }}
+
+  apply:
+    name: Terraform apply
+    needs: [ plan ]
+    runs-on: ubuntu-latest
+    environment: demo
+    defaults:
+      run:
+        working-directory: ${{ env.tf_actions_working_dir }}
+    
+    steps:
+    - uses: actions/checkout@v2
+
+    - name: Log in to Azure using OIDC
+      uses: azure/login@v1
+      with:
+        client-id: ${{ vars.AZURE_CLIENT_ID }}
+        tenant-id: ${{ vars.AZURE_TENANT_ID }}
+        subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v1
+
+    - name: Terraform Init
+      id: init
+      run: terraform init
+      env:
+        ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+        ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+        ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+        ARM_USE_OIDC: true
+
+    - name: Download the plan
+      uses: actions/download-artifact@v3
+      with:
+        name: tf-plan
+        path: ${{ env.tf_actions_working_dir }}
+
+    - name: Apply the plan
+      id: apply
+      run: terraform apply -no-color -auto-approve out.tfplan
+      env:
+        ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+        ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+        ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+        ARM_USE_OIDC: true
+    
+    - name: Create the plan summary
+      uses: actions/github-script@v6
+      if: always()
+      id: summary
+      env:
+        APPLY: '${{ steps.apply.outputs.stdout }}'
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        script: |
+          // 1. Prep the output
+          const output = `#### Terraform Apply 🚗\`${{ steps.apply.outcome }}\`
+          
+          <details><summary>Show details</summary>
+          
+          \`\`\`\n
+          ${process.env.APPLY}
+          \`\`\`
+          
+          </details>
+          
+          *Pusher: @${{ github.actor }}, Action: \`${{ github.event_name }}\`, Working Directory: \`${{ env.tf_actions_working_dir }}\`, Workflow: \`${{ github.workflow }}\`*`;
+          
+          // 2. Set the output variable
+          const fs = require('fs');
+          fs.writeFileSync('${{ env.tf_actions_working_dir }}/summary.md', output);
+          core.setOutput('summary', output);
+      
+    - name: Write a step summary
+      if: always()
+      run: cat summary.md >> $GITHUB_STEP_SUMMARY
+
+    - name: Publish apply as a status
+      if: github.event_name == 'pull_request'
+      uses: Sibz/github-status-action@v1.1.6
+      with:
+        authToken: ${{ secrets.GITHUB_TOKEN }}
+        state: ${{ steps.summary.outputs.summary }}
+        context: Terraform Plan
+        description: Terraform Plan Summary
+        sha: ${{ github.event.pull_request.head.sha }}
