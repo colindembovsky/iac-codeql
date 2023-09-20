@@ -1,6 +1,8 @@
 # CodeQL IaC Scan
 
-This repository contains a GitHub Actions workflow that uses CodeQL to analyze Infrastructure as Code (IaC) files. The workflow is triggered on push and pull request events on the `main` branch, as well as manually via the GitHub Actions UI.
+This repository contains a GitHub Actions workflow that uses CodeQL to analyze Infrastructure as Code (IaC) files using a custom extractor. The workflow is triggered on push and pull request events on the `main` branch, as well as manually via the GitHub Actions UI.
+
+The repo for the extractor is here: https://github.com/advanced-security/codeql-extractor-iac
 
 ## Workflow
 
